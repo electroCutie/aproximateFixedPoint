@@ -4,16 +4,13 @@ use fixed_point::*;
 
 fn main() {
 
-    let bad_pi = Fixed::from_decimal(3_14159265, 8);
-    let bad_tau:Fixed = bad_pi * 2;
-   
     let mut time = Fixed::ZERO;
-    let timestep = Fixed::from_decimal(0_0001, 4);
+    let timestep = Fixed::from_raw(1);
 
     loop{
         time = time + timestep;
-        if time > bad_tau {
-            return;
+        if time > Fixed::TAU {
+            break;
         }
 
         let sine = time.to_f32().sin();
@@ -24,4 +21,18 @@ fn main() {
             println!("{} - {} = {}", sine, sine_m.to_f32(), err);
         }
     }
+
+    for i in 1<<12..1<<30{
+        let f = Fixed::from_raw(i);
+
+        let inv_f = f.inverse();
+        let inv = 1.0 / f.to_f32();
+
+        let err = inv_f.to_f32() - inv;
+
+        if err.abs() > 0.001{
+            println!("{} - {} = {}", inv, inv_f.to_f32(), err);
+        }
+    }
+    
 }

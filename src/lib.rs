@@ -5,7 +5,9 @@ use core::ops::{Add, Sub, Mul, Div, Rem};
 const SCALE_BITS: i32 = 12;
 const SCALE_INV: i32 = 32 - SCALE_BITS;
 
-#[derive(Eq, PartialEq, Copy, Clone, Ord, PartialOrd)]
+const FRACTION_MASK: i32 = (1 << SCALE_INV) - 1;
+
+#[derive(Eq, PartialEq, Copy, Clone, Ord, PartialOrd, Debug)]
 pub struct Fixed{
     value: i32
 }
@@ -142,6 +144,7 @@ impl Fixed {
     }
 
     pub const ZERO: Fixed = Fixed{value: 0};
+    pub const ONE: Fixed = Fixed{value: 1 << SCALE_INV};
 
     pub fn clamp_i32(self, min: i32, max: i32) -> Fixed{
         if min > max {
@@ -167,23 +170,27 @@ impl Fixed {
         Fixed{value: self.value.abs()}
     }
 
+    pub const HALF :Fixed = Fixed::from_raw(524288);
+    pub const HPI  :Fixed = Fixed::from_raw(1647099);
+    pub const E    :Fixed = Fixed::from_raw(2850325);
+    pub const PI   :Fixed = Fixed::from_raw(3294199);
+    pub const TAU  :Fixed = Fixed::from_raw(6588397);
+
     pub fn sin(self: Fixed) -> Fixed{
-        const PI  :Fixed = Fixed::from_raw(3294199); //Fixed::from_decimal(3_14159265, 8);
-        const HPI :Fixed = Fixed::from_raw(3294199 >> 1);
-        let flip = self > PI;
+        let flip = self > Fixed::PI;
         
         // The first half is more accurate than the second
         let t = match flip {
-            true => self - PI,
+            true => self - Fixed::PI,
             _ => self
         };
 
         // and the first quarter is even more accurate
-        let t = match t > HPI {
-            true => HPI - (t - HPI),
+        let t = match t >= Fixed::HPI {
+            true => Fixed::PI-t,
             _ => t
         };
-    
+
         // 1/(2*3), 1/(4*5)...
         const I23   :Fixed = Fixed::from_raw(174763);
         const I45   :Fixed = Fixed::from_raw(52429);
@@ -194,9 +201,9 @@ impl Fixed {
         let t2 = t * t;
         let t3 = t * t2;
     
-        let t2_45   = t2 * I45;   // t^2 / 4*5
-        let t2_67   = t2 * I67;   // t^2 / 6*7
-        let t2_89   = t2 * I89;   // etc
+        let t2_45   = t2 * I45;  // t^2 / 4*5
+        let t2_67   = t2 * I67;  // t^2 / 6*7
+        let t2_89   = t2 * I89;  // etc
         
         let t3i  = t3  * I23;    // t^3 / 2*3
         let t5i  = t3i  * t2_45; // (t^3 * t^2) / (2*3 * 4*5)
@@ -210,4 +217,87 @@ impl Fixed {
             _ => ret
         }
     }
+
+    pub fn inverse(self) -> Fixed {
+        if self == Fixed::ZERO {
+            return Fixed::ZERO;
+        }
+
+        let negative = self < Fixed::ZERO;
+        let x = self.abs();
+
+        if x == Fixed::ONE {
+            return match negative {
+                true => Fixed::ONE.negate(),
+                _    => Fixed::ONE
+            }
+        }
+
+        if x.value <= (1 << (SCALE_INV - SCALE_BITS)){
+            // to big, saturate
+            let max = Fixed::from_raw(i32::MAX);
+            return match negative {
+                true => max.negate(),
+                _    => max
+            }
+        }
+
+        // const CROSSOVER:Fixed = Fixed{value: 524183 };
+        // if x > CROSSOVER{
+        if x > Fixed::ONE{
+            let mut n = 0;  
+            // Just get the whole part of the number
+            let whole = x.value >> SCALE_INV;
+            // find the power of two
+            while whole >> n > 1 {
+                n += 1;
+            }
+
+            // Round up
+            if whole - (whole >> 1) > 0 {
+                n += 1;
+            }
+
+            // We will use a taylor series centered around this point
+            let taylor_pt = 1 << n;
+            // 1 / taylor_pt
+            let taylor_i = Fixed{value: 1 << (SCALE_INV - n)};
+
+            // Multiplicitive basis, each term is multiplied by this to get the next term
+            let mul_basis = taylor_i.negate() * (-taylor_pt + x);
+
+            let mut acc = Fixed::ZERO;  // result accumulator
+            let mut mul_acc = taylor_i; // term accummulator
+
+            let mut n = 0;
+            while n < 11 && mul_acc.value > 100{
+                acc = acc + mul_acc;
+                mul_acc = mul_acc * mul_basis;
+                n += 1;
+            }
+
+            return match negative {
+                true => acc.negate(),
+                _    =>  acc
+            };
+        } else {
+            let mut guess = Fixed::ONE;
+            let one_bits = Fixed::ONE.value;
+            let mut fractional = x.value << 1;
+            while fractional < one_bits {
+                guess = Fixed{value: guess.value << 1};
+                fractional = fractional << 1;
+            }
+
+            for _ in 0..8{
+                let next = guess * (2 - (x * guess));
+                if (next.value - guess.value).abs() < 100{
+                    return next;
+                }
+                guess = next;
+            }
+            panic!("failed to converge");
+        }
+    }
+
 }

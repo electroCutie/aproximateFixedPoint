@@ -15,3 +15,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "main"
 path = "src/main.rs"
+
+[profile.dev]
+debug = true # symbols are nice and they don't increase the size on Flash
+
+[profile.release]
+opt-level = 's'
+debug = true # symbols are nice and they don't increase the size on Flash
+lto = true # better optimizations
