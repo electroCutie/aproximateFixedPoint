@@ -1,22 +1,84 @@
-
 #![no_std]
-use core::ops::{Add, Sub, Mul, Div, Rem};
+
+use core::{
+    fmt::Debug, 
+    ops::{Add, Sub, Mul, Div, Rem, Shr, Shl}
+};
 
 const SCALE_BITS: i32 = 12;
 const SCALE_INV: i32 = 32 - SCALE_BITS;
+const FRAC_BITS: i8 = SCALE_INV as i8;
 
-const FRACTION_MASK: i32 = (1 << SCALE_INV) - 1;
+#[inline(always)]
+fn shift<S>(x: S, s: i8) -> S where
+    S: Shr<i8, Output = S> + Shl<i8, Output = S>
+{
+    if s < 0 {
+        x << -s
+    } else {
+        x >> s
+    }
+}
+
+pub trait Scaled {
+    fn value(&self) -> i32;
+
+    fn frac_bits(&self) -> i8;
+}
 
 #[derive(Eq, PartialEq, Copy, Clone, Ord, PartialOrd, Debug)]
 pub struct Fixed{
     value: i32
 }
 
-// impl Ord for Fixed{
-//     fn cmp(self, o: Fixed) -> Ordering{
-//         self.value.cmp(o.value);
-//     }
-// }
+impl Scaled for Fixed {
+    #[inline(always)] // constant
+    fn frac_bits(&self) -> i8 {
+        FRAC_BITS as i8
+    }
+
+    #[inline(always)] // field access
+    fn value(&self) -> i32 {
+        self.value
+    }
+}
+
+pub struct GivenScale{
+    pub raw_value: i32,
+    pub frac_bits: u8
+}
+
+impl Scaled for GivenScale {
+    #[inline(always)] // field access
+    fn frac_bits(&self) -> i8 {
+        self.frac_bits as i8
+    }
+
+    #[inline(always)] // field access
+    fn value(&self) -> i32 {
+        self.raw_value
+    }
+}
+
+macro_rules! scaled_int {
+    ($($T:ty),+) => {
+        $(
+            impl Scaled for $T {
+                #[inline(always)] // constant
+                fn frac_bits(&self) -> i8 {
+                    0
+                }
+            
+                #[inline(always)] // identity
+                fn value(&self) -> i32 {
+                    *self as i32
+                }
+            }
+        )+
+    }
+}
+
+scaled_int!{i32, u32, i16, u16, i8, u8}
 
 impl Rem for Fixed{
     type Output = Self;
@@ -25,96 +87,70 @@ impl Rem for Fixed{
     }
 }
 
-impl Add<Fixed> for Fixed {
-    type Output = Fixed;
-    fn add(self, o: Self)-> Fixed{
-        Fixed{value: self.value + o.value}
-    }
+#[inline(always)]
+fn add_0(l: i32, lb: i8, r: i32, rb: i8) -> Fixed{
+    Fixed{value: shift(l, lb - FRAC_BITS) + shift(r, rb - FRAC_BITS)}
 }
 
-impl Sub<Fixed> for Fixed {
-    type Output = Fixed;
-    fn sub(self, o: Self)-> Fixed{
-        Fixed{value: self.value - o.value}
-    }
+#[inline(always)]
+fn sub_0(l: i32, lb: i8, r: i32, rb: i8) -> Fixed{
+    Fixed{value: shift(l, lb - FRAC_BITS) - shift(r, rb - FRAC_BITS)}
 }
 
-impl Mul<Fixed> for Fixed {
-    type Output = Fixed;
-    fn mul(self, o: Self)-> Fixed{
-        let intermediate:i64 = self.value as i64 * o.value as i64;
-        Fixed{value: (intermediate >> SCALE_INV) as i32}
-    }
+#[inline(always)]
+fn mul_0(l: i32, lb: i8, r: i32, rb: i8) -> Fixed{
+    let intermediate: i64 = l as i64 * r as i64;
+    let sh =  lb + rb - FRAC_BITS;
+    Fixed{value: shift(intermediate, sh) as i32}
 }
 
-impl Div<Fixed> for Fixed{
-    type Output = Fixed;
-    fn div(self, o: Self) -> Fixed{
-        let dividend = (self.value as i64) << 32u16;
-        let intermediate = dividend / o.value as i64;
-
-        Fixed{value: (intermediate >> SCALE_BITS) as i32}
-    }   
+#[inline(always)]
+fn div_0(l: i32, lb: i8, r: i32, rb: i8) -> Fixed{
+    let numerator = (l as i64) << 32;
+    let intermediate = numerator / r as i64;
+    let div_frac_bits = lb + 32 - rb;
+    let sh =  div_frac_bits - FRAC_BITS;
+    Fixed{value: shift(intermediate, sh) as i32}
 }
 
-/* i32 variants */
-impl Add<i32> for Fixed {
-    type Output = Fixed;
-    fn add(self, o: i32)-> Fixed{
-        Fixed{value: self.value + (o << SCALE_INV)}
-    }
+macro_rules! fixed_math {
+    ( $( ($LHS:ty, $RHS:ty) ),+ )
+    => { $(
+        macro_rules! fixed_math_opr {
+            ($Opr:ident, $op:ident, $op0:ident) => {
+                impl $Opr<$RHS> for $LHS {
+                    type Output = Fixed;
+                    fn $op(self, o: $RHS)-> Fixed{
+                        $op0(self.value(), self.frac_bits(), o.value(), o.frac_bits())
+                    }
+                }
+            }
+        }
+        fixed_math_opr!{Add, add, add_0}
+        fixed_math_opr!{Sub, sub, sub_0}
+        fixed_math_opr!{Mul, mul, mul_0}
+        fixed_math_opr!{Div, div, div_0}
+    )+ }
 }
 
-impl Sub<i32> for Fixed {
-    type Output = Fixed;
-    fn sub(self, o: i32)-> Fixed{
-        Fixed{value: self.value - (o << SCALE_INV)}
-    }
+fixed_math!{
+    (Fixed, Fixed),
+    (GivenScale, Fixed), (Fixed, GivenScale),
+    (i32, Fixed), (Fixed, i32),
+    (u32, Fixed), (Fixed, u32),
+    (i16, Fixed), (Fixed, i16),
+    (u16, Fixed), (Fixed, u16),
+    ( i8, Fixed), (Fixed, i8),
+    ( u8, Fixed), (Fixed, u8),
+    (i32, GivenScale), (GivenScale, i32),
+    (u32, GivenScale), (GivenScale, u32),
+    (i16, GivenScale), (GivenScale, i16),
+    (u16, GivenScale), (GivenScale, u16),
+    ( i8, GivenScale), (GivenScale, i8),
+    ( u8, GivenScale), (GivenScale, u8)
 }
 
-impl Mul<i32> for Fixed {
-    type Output = Fixed;
-    fn mul(self, o: i32)-> Fixed{
-        Fixed{value: self.value * o}
-    }
-}
 
-impl Div<i32> for Fixed{
-    type Output = Fixed;
-    fn div(self, o: i32) -> Fixed{
-        Fixed{value: self.value / o}
-    }
-}
-
-/* i32 LHS variants */
-impl Add<Fixed> for i32 {
-    type Output = Fixed;
-    fn add(self, o: Fixed)-> Fixed{
-        Fixed{value: (self << SCALE_INV) + o.value}
-    }
-}
-
-impl Sub<Fixed> for i32 {
-    type Output = Fixed;
-    fn sub(self, o: Fixed)-> Fixed{
-        Fixed{value: (self << SCALE_INV) - o.value}
-    }
-}
-
-impl Mul<Fixed> for i32 {
-    type Output = Fixed;
-    fn mul(self, o: Fixed)-> Fixed{
-        Fixed{value: self * o.value}
-    }
-}
-
-impl Div<Fixed> for i32{
-    type Output = Fixed;
-    fn div(self, o: Fixed) -> Fixed{
-        let intermediate = ((self as i64) << 32u16) / o.value as i64;
-        Fixed{value: (intermediate << (SCALE_INV - (32 - SCALE_INV))) as i32}
-    }
-}
 
 impl Fixed {
     pub fn to_f32(&self) -> f32{
@@ -125,8 +161,12 @@ impl Fixed {
         self.value >> SCALE_INV
     }
 
-    pub fn from_i32(i: i32) -> Fixed{
+    pub const fn from_i32(i: i32) -> Fixed{
         Fixed{value: i << SCALE_INV}
+    }
+
+    pub fn from_int<F>(i: F) -> Fixed where F: Into<i32>{
+        Fixed{value: i.into() << SCALE_INV}
     }
 
     pub const fn from_raw(value: i32) -> Fixed{
@@ -218,6 +258,12 @@ impl Fixed {
         }
     }
 
+    pub fn triangle(self) -> Fixed{
+        const TWO:Fixed = Fixed::from_i32(2);
+        const ITAU: Fixed = Fixed::from_raw(166886);
+        TWO * (ITAU * self - Fixed::HALF)
+    }
+
     pub fn inverse(self) -> Fixed {
         if self == Fixed::ZERO {
             return Fixed::ZERO;
@@ -242,8 +288,6 @@ impl Fixed {
             }
         }
 
-        // const CROSSOVER:Fixed = Fixed{value: 524183 };
-        // if x > CROSSOVER{
         if x > Fixed::ONE{
             let mut n = 0;  
             // Just get the whole part of the number
@@ -259,12 +303,12 @@ impl Fixed {
             }
 
             // We will use a taylor series centered around this point
-            let taylor_pt = 1 << n;
+            // let taylor_pt = 1 << n;
             // 1 / taylor_pt
             let taylor_i = Fixed{value: 1 << (SCALE_INV - n)};
 
             // Multiplicitive basis, each term is multiplied by this to get the next term
-            let mul_basis = taylor_i.negate() * (-taylor_pt + x);
+            let mul_basis = (taylor_i.negate() * x) + 1;
 
             let mut acc = Fixed::ZERO;  // result accumulator
             let mut mul_acc = taylor_i; // term accummulator
@@ -290,7 +334,7 @@ impl Fixed {
             }
 
             for _ in 0..8{
-                let next = guess * (2 - (x * guess));
+                let next: Fixed = guess * (2 - (x * guess));
                 if (next.value - guess.value).abs() < 100{
                     return next;
                 }
@@ -298,6 +342,61 @@ impl Fixed {
             }
             panic!("failed to converge");
         }
+    }
+
+    pub fn inv_i32(denominator: i32) -> Fixed{
+        if denominator == 0 {
+            return Fixed::ZERO;
+        }
+
+        let negative = denominator < 0;
+        let x = denominator.abs();
+
+        if x == 1 {
+            return match negative {
+                true => Fixed::ONE.negate(),
+                _    => Fixed::ONE
+            }
+        }
+
+        let mut n = 0;  
+        // find the power of two
+        while x >> n > 1 {
+            n += 1;
+        }
+
+        // Round up
+        if x - (x >> 1) > 0 {
+            n += 1;
+        }
+
+        if n > SCALE_INV {
+            return Fixed::ZERO;
+        }
+
+        // We will use a taylor series centered around this point
+        // let taylor_pt = 1 << n;
+
+        // 1 / taylor_pt
+        let taylor_i = Fixed{value: 1 << (SCALE_INV - n)};
+
+        // Multiplicitive basis, each term is multiplied by this to get the next term
+        let mul_basis = (taylor_i.negate() * x) + 1;
+
+        let mut acc = Fixed::ZERO;  // result accumulator
+        let mut mul_acc = taylor_i; // term accummulator
+
+        let mut n = 0;
+        while n < 11 && mul_acc.value > 100{
+            acc = acc + mul_acc;
+            mul_acc = mul_acc * mul_basis;
+            n += 1;
+        }
+
+        return match negative {
+            true => acc.negate(),
+            _    =>  acc
+        };
     }
 
 }
