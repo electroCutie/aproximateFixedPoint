@@ -1,7 +1,8 @@
 #![no_std]
 
 use core::{
-    fmt::Debug, 
+    fmt::Debug,
+    cmp::Ord,
     ops::{Add, Sub, Mul, Div, Rem, Shr, Shl}
 };
 
@@ -43,9 +44,10 @@ impl Scaled for Fixed {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct GivenScale{
     pub raw_value: i32,
-    pub frac_bits: u8
+    pub frac_bits: i8
 }
 
 impl Scaled for GivenScale {
@@ -135,6 +137,7 @@ macro_rules! fixed_math {
 
 fixed_math!{
     (Fixed, Fixed),
+    (GivenScale, GivenScale),
     (GivenScale, Fixed), (Fixed, GivenScale),
     (i32, Fixed), (Fixed, i32),
     (u32, Fixed), (Fixed, u32),
@@ -149,7 +152,6 @@ fixed_math!{
     ( i8, GivenScale), (GivenScale, i8),
     ( u8, GivenScale), (GivenScale, u8)
 }
-
 
 
 impl Fixed {
@@ -216,6 +218,36 @@ impl Fixed {
     pub const PI   :Fixed = Fixed::from_raw(3294199);
     pub const TAU  :Fixed = Fixed::from_raw(6588397);
 
+    pub fn sin_dimless(self: Fixed) -> Fixed{
+        let flip = self > Fixed::HALF;
+        
+        // The first half is more accurate than the second
+        let z = match flip {
+            true => self - Fixed::HALF,
+            _ => self
+        };
+        
+        // and the first quarter is even more accurate
+        const QUARTER:Fixed = Fixed{value: 262144};
+        let z = match z >= QUARTER {
+            true => Fixed::HALF-z,
+            _ => z
+        };
+
+        let z = Fixed{value: z.value << 2}; // the function was designed for a domain of 0-4
+        let hz = Fixed{value: z.value >> 1};
+        let zsq = z * z;
+        const PIM3:Fixed = Fixed{value: 148471};
+        const TAUM5:Fixed = Fixed{value: 1345517};
+
+        let ret = hz * (Fixed::PI - (zsq * (TAUM5 - (zsq * PIM3))));
+
+        match flip {
+            true => ret.negate(),
+            _ => ret
+        }
+    }
+
     pub fn sin(self: Fixed) -> Fixed{
         let flip = self > Fixed::PI;
         
@@ -256,12 +288,6 @@ impl Fixed {
             true => ret.negate(),
             _ => ret
         }
-    }
-
-    pub fn triangle(self) -> Fixed{
-        const TWO:Fixed = Fixed::from_i32(2);
-        const ITAU: Fixed = Fixed::from_raw(166886);
-        TWO * (ITAU * self - Fixed::HALF)
     }
 
     pub fn inverse(self) -> Fixed {
